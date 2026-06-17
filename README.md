@@ -105,6 +105,7 @@ Both tools end with the part that matters: a plain-English list of findings.
 |---|---|
 | `-Region eu` | region for the connectivity test (`com`/`eu`/`us`/`com.au`/`jp`) |
 | `-Output report.txt` | also write the report to a file |
+| `-Bundle` | build a support bundle (report + recent KeeperLogger logs + `currentPolicies.json`) as one `.zip` in `C:\temp` (change with `-BundlePath`) |
 | `-Live` | capture a window: press Enter, reproduce the elevation, see exactly what the agent did (or didn't do) |
 | `-Raw` | show identities unredacted (internal use) |
 

@@ -43,10 +43,13 @@ param(
     [string]$Output,
     [switch]$Raw,
     [switch]$Json,
-    [switch]$Live
+    [switch]$Live,
+    [switch]$Bundle,
+    [string]$BundlePath = "C:\temp"
 )
 
 $ErrorActionPreference = "Continue"
+$ProgressPreference = "SilentlyContinue"   # avoid CLIXML/progress noise over SSH/remoting
 $script:Lines    = New-Object System.Collections.Generic.List[string]
 $script:Result   = [ordered]@{}
 $script:Findings = New-Object System.Collections.Generic.List[string]
@@ -79,6 +82,50 @@ function Flush-Report {
             $text | Out-File -FilePath $Output -Encoding utf8
             if ($Raw) { Write-Warning "$Output contains UNREDACTED identities." } else { Write-Host "`nWrote report to $Output" }
         } catch { Write-Warning ("Could not write " + $Output + ": " + $_.Exception.Message) }
+    }
+    if ($Bundle) { New-Bundle $text }
+}
+
+function New-Bundle([string]$reportText) {
+    # Collect a support bundle: this report + recent KeeperLogger logs +
+    # currentPolicies.json, zipped into one file to hand to Keeper support.
+    # NOTE: the raw logs are NOT redacted -- only share with the vendor.
+    try {
+        $paths = Get-EpmPaths
+        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $name  = "epm-bundle-" + $env:COMPUTERNAME + "-" + $stamp
+        if (-not (Test-Path $BundlePath)) { New-Item -ItemType Directory -Path $BundlePath -Force | Out-Null }
+        $work = Join-Path $env:TEMP $name
+        if (Test-Path $work) { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+
+        # 1. the report
+        $reportText | Out-File (Join-Path $work "report.txt") -Encoding utf8
+
+        # 2. currentPolicies.json
+        $cp = Get-ChildItem $paths.PluginBin -Recurse -Filter "currentPolicies.json" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cp) { Copy-Item $cp.FullName (Join-Path $work "currentPolicies.json") -ErrorAction SilentlyContinue }
+
+        # 3. recent KeeperLogger logs (last 3 days)
+        if (Test-Path $paths.LogDir) {
+            $logDest = Join-Path $work "logs"
+            New-Item -ItemType Directory -Path $logDest -Force | Out-Null
+            Get-ChildItem $paths.LogDir -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -ge (Get-Date).AddDays(-3) } |
+                Copy-Item -Destination $logDest -ErrorAction SilentlyContinue
+        }
+
+        $zip = Join-Path $BundlePath ($name + ".zip")
+        if (Test-Path $zip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
+        Compress-Archive -Path (Join-Path $work "*") -DestinationPath $zip -Force
+        Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+
+        Write-Host ""
+        Write-Host ("  Support bundle: " + $zip)
+        Write-Host  "  (contains the report, recent KeeperLogger logs, and currentPolicies.json"
+        Write-Host  "   -- logs are RAW/unredacted; share only with Keeper support.)"
+    } catch {
+        Write-Warning ("Could not build bundle: " + $_.Exception.Message)
     }
 }
 function Section([string]$t) {
@@ -221,7 +268,7 @@ function Invoke-LiveCapture {
     # ----- scheduled tasks that fired during the window -----
     $ranTasks = New-Object System.Collections.Generic.List[string]
     try {
-        foreach ($t in Get-ScheduledTask -TaskPath "\Keeper Security\*" -ErrorAction SilentlyContinue) {
+        foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match 'Keeper' -or $_.TaskPath -match 'Keeper' })) {
             $lr = ($t | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue).LastRunTime
             if ($lr -and $lr -ge $t0) { $ranTasks.Add($t.TaskName + " @ " + $lr.ToString("HH:mm:ss")) }
         }
@@ -290,19 +337,22 @@ Item "plugins\bin" (Test-Path $pluginBin)
 $script:Result["install_dir"] = $base
 
 # --------------------------------------------------------------------------- #
-Section "2. WINDOWS SERVICE"
+Section "2. WINDOWS SERVICES (Keeper)"
 try {
-    $svc = Get-Service -Name "Keeper*" -ErrorAction SilentlyContinue |
-           Where-Object { $_.DisplayName -match "Endpoint" -or $_.Name -match "Endpoint" }
-    if (-not $svc) { $svc = Get-Service -Name "KeeperEndpointService" -ErrorAction SilentlyContinue }
+    $svc = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "Keeper" -or $_.DisplayName -match "Keeper" }
     if ($svc) {
+        $mainSeen = $false
         foreach ($s in $svc) {
-            Item $s.Name $s.Status ($(if ($s.Status -ne "Running") { "NOT RUNNING" } else { "" }))
-            if ($s.Status -ne "Running") { Flag "Service '$($s.Name)' is $($s.Status) (expected Running)." }
+            Item $s.DisplayName $s.Status ($(if ($s.Status -ne "Running") { "NOT RUNNING" } else { "" }))
+            if ($s.DisplayName -match "Endpoint Privilege" -or $s.Name -match "Endpoint") {
+                $mainSeen = $true
+                if ($s.Status -ne "Running") { Flag "Service '$($s.DisplayName)' is $($s.Status) (expected Running)." }
+            }
         }
+        if (-not $mainSeen) { Flag "Keeper EPM service not found among the Keeper services." }
     } else {
-        Item "KeeperEndpointService" "NOT FOUND" "service missing"
-        Flag "Keeper endpoint service not found -- agent may not be installed."
+        Item "Keeper services" "NONE FOUND" "agent may not be installed"
+        Flag "No Keeper services found -- agent may not be installed."
     }
 } catch { Item "service query" ("error: " + $_.Exception.Message) }
 
@@ -316,7 +366,7 @@ if ($health.__error) { Item "/health" ("FAIL: " + $health.__error) "service not 
 else { Item "/health" ($health | ConvertTo-Json -Compress -Depth 4) }
 
 if ($reg.__error) {
-    $note = if ($reg.__error -match '403|401') { "auth-gated (token needed); not necessarily broken" } else { "endpoint not responding" }
+    $note = if ($reg.__error -match '403|401') { "needs an authenticated Admin session (SelectiveAuth); a plain probe is denied -- not broken" } else { "endpoint not responding" }
     Item "/registration" ("unavailable: " + $reg.__error) $note
 }
 else {
@@ -326,7 +376,7 @@ else {
 }
 
 if ($plugs.__error) {
-    $note = if ($plugs.__error -match '403|401') { "auth-gated (token needed); not necessarily broken" } else { "endpoint not responding" }
+    $note = if ($plugs.__error -match '403|401') { "needs an authenticated Admin session (SelectiveAuth); a plain probe is denied -- not broken" } else { "endpoint not responding" }
     Item "/api/plugins" ("unavailable: " + $plugs.__error) $note
 }
 else {
@@ -357,26 +407,34 @@ foreach ($port in 6888,6889,8675) {
 
 # --------------------------------------------------------------------------- #
 Section "5. PLUGIN BINARIES"
-$bins = @("KeeperClient\KeeperClient.exe","keeperAgent\keeperAgent.exe",
-          "KeeperMessage\KeeperMessage.exe","KeeperApproval\KeeperApproval.exe")
-foreach ($b in $bins) {
-    $full = Join-Path $pluginBin $b
-    $ok = Test-Path $full
-    Item $b $ok ($(if (-not $ok) { "MISSING" } else { "" }))
-    if (-not $ok) { Flag "Plugin binary missing: $b (corrupt install -> clean reinstall)." }
+# Core components of the elevation / user-session chain (confirmed present in
+# current EPM builds). Note: there is no "KeeperApproval.exe" -- approval is
+# handled by KeeperUSession / KeeperMessage.
+$critical = @("keeperAgent","KeeperApi","KeeperClient","KeeperMessage","KeeperPolicy","KeeperUSession")
+$present = @()
+try { $present = @(Get-ChildItem $pluginBin -Recurse -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -Expand BaseName -Unique) } catch {}
+Item "exe files found" $present.Count
+foreach ($c in $critical) {
+    $ok = $present -contains $c
+    Item $c $ok ($(if (-not $ok) { "MISSING" } else { "" }))
+    if (-not $ok) { Flag "Core component missing: $c.exe (corrupt install -> clean reinstall)." }
 }
+$extra = @($present | Where-Object { $critical -notcontains $_ } | Sort-Object)
+if ($extra.Count -gt 0) { Item "other components" ($extra -join ", ") }
 
 # --------------------------------------------------------------------------- #
-Section "6. SCHEDULED TASKS (\Keeper Security\)"
+Section "6. SCHEDULED TASKS (Keeper, any path)"
+# The launcher task is typically '\KeeperClient Startup' at the root path --
+# not under '\Keeper Security\', so search every path.
 try {
-    $tasks = Get-ScheduledTask -TaskPath "\Keeper Security\*" -ErrorAction SilentlyContinue
-    if (-not $tasks) {
-        Item "tasks" "NONE FOUND" "no tasks under \Keeper Security\"
-        Flag "No scheduled tasks under '\Keeper Security\' -- user-session components cannot launch (reinstall recreates them)."
+    $tasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match 'Keeper' -or $_.TaskPath -match 'Keeper' })
+    if ($tasks.Count -eq 0) {
+        Item "Keeper tasks" "NONE FOUND" "no Keeper scheduled task on any path"
+        Flag "No Keeper scheduled task found (any path) -- the user-session launcher may be missing (reinstall recreates it)."
     } else {
         foreach ($t in $tasks) {
             $state = $t.State
-            Item $t.TaskName $state ($(if ($state -eq "Disabled") { "DISABLED" } else { "" }))
+            Item ($t.TaskPath + $t.TaskName) $state ($(if ($state -eq "Disabled") { "DISABLED" } else { "" }))
             if ($state -eq "Disabled") { Flag "Scheduled task '$($t.TaskName)' is Disabled." }
         }
     }
@@ -408,6 +466,7 @@ if (Test-Path $logDir) {
     if ($latest) {
         Item "latest log" $latest.Name
         Item "  modified" $latest.LastWriteTime
+        Item "  CAPTURED ERRORS ARE IN" $latest.FullName        # <-- where to look / collect from
         try {
             $tail = Get-Content $latest.FullName -Tail 2000 -ErrorAction SilentlyContinue
             $merge = $tail | Select-String "policy merge complete|policies\s*=|merged.*polic" | Select-Object -Last 1
@@ -416,9 +475,23 @@ if (Test-Path $logDir) {
             $mline = if ($merge) { $merge.Line.Trim() } else { "no 'policy' lines in last 2000" }
             if ($mline.Length -gt 200) { $mline = $mline.Substring(0,200) + " ..." }
             Item "  latest policy log line" $mline
+
+            # surface captured errors/warnings (count only -- benign errors are normal;
+            # this tells the user WHERE to read them, it does not auto-flag)
+            $errs  = @($tail | Select-String "\[ERR\]|\[FTL\]|\[ERROR\]|Exception")
+            $warns = @($tail | Select-String "\[WRN\]|\[WARN")
+            Item "  errors / warnings (last 2000 lines)" ("$($errs.Count) error(s), $($warns.Count) warning(s)")
+            if ($errs.Count -gt 0) {
+                Emit "  most recent error lines (full text in the log file above):"
+                foreach ($e in ($errs | Select-Object -Last 3)) {
+                    $el = $e.Line.Trim()
+                    if ($el.Length -gt 180) { $el = $el.Substring(0, 180) + " ..." }
+                    Emit ("    " + $el)
+                }
+            }
             if ($secfail) {
                 Item "  SECURITY VALIDATION" $secfail.Line.Trim() "plugin failed validation"
-                Flag "Log shows 'Plugin failed security validation'."
+                Flag "Log shows 'Plugin failed security validation' -- see $($latest.FullName)"
             }
         } catch {}
     }
@@ -445,9 +518,14 @@ else { Item ".NET 8 runtime" "not found on PATH or in shared runtimes -- the age
 Section "10. CONNECTIVITY (Keeper router: $Region)"
 $kp = "connect.keepersecurity.$Region"
 try {
+    $dnsSrv = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.ServerAddresses } | Select-Object -Expand ServerAddresses) -join ", "
+    if ($dnsSrv) { Item "configured DNS servers" $dnsSrv }
+} catch {}
+try {
     $dns = Resolve-DnsName -Name $kp -ErrorAction SilentlyContinue
     if ($dns) { Item "DNS $kp" (($dns | Where-Object { $_.IPAddress } | Select-Object -First 1).IPAddress) }
-    else { Item "DNS $kp" "RESOLVE FAILED" "DNS failure"; Flag "DNS resolution failed for $kp." }
+    else { Item "DNS $kp" "RESOLVE FAILED" "DNS failure"; Flag "DNS resolution failed for $kp (check DNS servers above / egress)." }
 } catch { Item "DNS $kp" ("error: " + $_.Exception.Message) }
 try {
     $tnc = Test-NetConnection -ComputerName $kp -Port 443 -WarningAction SilentlyContinue
