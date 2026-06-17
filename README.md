@@ -62,6 +62,18 @@ Both tools end with the part that matters: a plain-English list of findings.
     enforce elevation policy  NO  <-- likely root cause
 ```
 
+## Reports & output
+
+- **Where they go** — by default the report prints to the screen. Add
+  `--output report.txt` (`-Output report.txt` for the `.ps1`) to also write a
+  file; it lands in your current directory unless you give a full path.
+- **Format** — plain UTF-8 text, or JSON with `--format json`. **Not
+  compressed** — open or attach the file directly.
+- **Text vs JSON** — the text report is a readable summary; a couple of
+  high-volume lists (the application-collection inventory, audit events) are
+  sampled so it stays readable. `--format json` is the **complete** export —
+  every collection, every policy that reaches the device, full approval detail.
+
 ## Options
 
 `epm_endpoint_check.ps1`:

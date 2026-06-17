@@ -369,7 +369,7 @@ def report_tenant_collections(plugin, all_collections):
         emit("    (none) -- no application collections exist. File inventory is disabled")
         emit("    by default in recent agents; enable it on a test machine to populate.")
     else:
-        emit("    showing first %d of %d as a sample (use --format json for all):"
+        emit("    showing first %d of %d as a sample (--format json = full inventory):"
              % (min(SAMPLE, len(app_cols)), len(app_cols)))
     for c in app_cols[:SAMPLE]:
         mask_vals = c.collection_type in IDENTITY_COLLECTION_TYPES
@@ -493,9 +493,9 @@ def endpoint_checklist():
     ...\\Plugins\\bin\\KeeperApproval\\KeeperApproval.exe
 
   Log file (new file daily, kept 15 days -- grab the day the issue happened):
-    Windows: C:\\Program Files\\Keeper Security\\Endpoint Privilege Management\\Plugins\\bin\\KeeperLogger\\Log
-    NOTE: docs say "Endpoint Privilege Management"; some notes say "...Manager".
-          Verify the ACTUAL folder name on this build -- a wrong path wastes hours.
+    Windows: C:\\Program Files\\Keeper Security\\Endpoint Privilege Manager\\Plugins\\bin\\KeeperLogger\\Log
+    NOTE: confirmed install path is "Endpoint Privilege Manager"; some docs say
+          "...Management". Check both if the folder is not where expected.
     Linux:   /opt/keeper/sbin/Plugins/bin/KeeperLogger/Log
     macOS:   /Library/Keeper/sbin/Plugins/bin/KeeperLogger/Log
 
@@ -506,7 +506,7 @@ def endpoint_checklist():
     Restart KeeperEndpointService, then log the affected user out and back in.
 
   EDR (CrowdStrike / SentinelOne / Sophos) can block process launch from the
-  install dir -> exclude  C:\\Program Files\\Keeper Security\\Endpoint Privilege Management\\""")
+  install dir -> exclude  C:\\Program Files\\Keeper Security\\Endpoint Privilege Manager\\""")
 
 
 # --------------------------------------------------------------------------- #
@@ -562,6 +562,15 @@ def main():
             "agent_count": len(list(plugin.agents.get_all_entities())),
             "policy_count": len(policies),
             "collection_count": len(all_collections),
+            # complete inventory of every collection (the full set the text report only samples)
+            "collections_inventory": [
+                {"uid": c.collection_uid,
+                 "type": c.collection_type,
+                 "type_name": pedm_shared.collection_type_to_name(c.collection_type),
+                 "data": {k: (mask_str(v) if c.collection_type in IDENTITY_COLLECTION_TYPES else v)
+                          for k, v in (c.collection_data or {}).items()}}
+                for c in all_collections.values()
+            ],
             "scope": [],
         }
         for a in scope:
@@ -574,6 +583,19 @@ def main():
                     reach.append({"uid": pol.policy_uid, "name": d.get("PolicyName"),
                                   "type": d.get("PolicyType"),
                                   "status": "off" if pol.disabled else d.get("Status")})
+            ap_detail = []
+            for ap in plugin.approvals.get_all_entities():
+                if ap.agent_uid != a.agent_uid:
+                    continue
+                ap_detail.append({
+                    "approval_uid": ap.approval_uid,
+                    "type": ap.approval_type,
+                    "application": {k: mask_field(k, v) for k, v in (ap.application_info or {}).items()},
+                    "account": {k: mask_str(v) for k, v in (ap.account_info or {}).items()},
+                    "justification": ("<%d chars redacted>" % len(ap.justification or "")
+                                      if (REDACT and ap.justification) else (ap.justification or "")),
+                    "created": ap.created,
+                })
             data["scope"].append({
                 "agent_uid": a.agent_uid,
                 "machine": (a.properties or {}).get("MachineName") if a.properties else None,
@@ -581,7 +603,8 @@ def main():
                 "disabled": a.disabled,
                 "collections": acols,
                 "reached_by_policies": reach,
-                "approvals": sum(1 for ap in plugin.approvals.get_all_entities() if ap.agent_uid == a.agent_uid),
+                "approval_count": len(ap_detail),
+                "approvals": ap_detail,
             })
         out = json.dumps(data, indent=2, default=str)
         print(out)
