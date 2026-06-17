@@ -22,12 +22,19 @@ Rule of thumb: the `.ps1` says what's **actually happening on the box**; the
 
 No Keeper login and no Python needed — just PowerShell.
 
-1. Copy **`epm_endpoint_check.ps1`** onto the machine (anywhere, e.g. your Downloads folder).
+1. Get the script onto the machine — **use the raw file, not the GitHub web
+   page** (saving the page gives you HTML, which won't run). Easiest, in
+   PowerShell:
+   ```powershell
+   Invoke-WebRequest https://raw.githubusercontent.com/jlima8900/keeper-epm-diagnostics/master/epm_endpoint_check.ps1 -OutFile C:\temp\epm_endpoint_check.ps1
+   ```
+   Or on the file's GitHub page click **Raw**, then save as plain text. (No
+   internet on the box? Download it elsewhere and copy it over.)
 2. Open PowerShell **as administrator**: click **Start**, type `PowerShell`,
    right-click it, choose **Run as administrator**.
-3. Go to the folder where you put the file, for example:
+3. Go to the folder where you put the file:
    ```powershell
-   cd $env:USERPROFILE\Downloads
+   cd C:\temp
    ```
 4. Run it:
    ```powershell
