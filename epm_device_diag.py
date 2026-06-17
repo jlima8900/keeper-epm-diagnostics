@@ -266,11 +266,25 @@ def report_agent(p, plugin, agent, online, all_collections, policies, all_agents
     sub("collections this device belongs to (%d)" % len(agent_cols))
     if not agent_cols:
         emit("    (none) -- device is in no collections; most policies will not target it")
-    for cu in sorted(agent_cols):
+    # breakdown by type (the bulk Application/App-Name entries are the global allowlist)
+    dev_by_type = {}
+    for cu in agent_cols:
         col = all_collections.get(cu)
-        if col:
-            tname = pedm_shared.collection_type_to_name(col.collection_type)
-            emit("    %-26s %-18s" % (cu, tname))
+        dev_by_type.setdefault(col.collection_type if col else -1, []).append(cu)
+    for t in sorted(dev_by_type):
+        tname = pedm_shared.collection_type_to_name(t) if t >= 0 else "(unknown)"
+        emit("    %-22s (type %-4s): %d" % (tname, t, len(dev_by_type[t])))
+    # list only the targeting-relevant memberships (machine/group/user), not the allowlist
+    interesting = sorted(cu for cu in agent_cols
+                         if all_collections.get(cu) and
+                         all_collections[cu].collection_type not in APP_COLLECTION_TYPES)
+    if interesting:
+        emit("    -- machine/group/user memberships (the ones policies usually target) --")
+        for cu in interesting[:40]:
+            col = all_collections[cu]
+            emit("      %-26s %s" % (cu, pedm_shared.collection_type_to_name(col.collection_type)))
+        if len(interesting) > 40:
+            emit("      ... (%d more)" % (len(interesting) - 40))
     machine_cols = {cu for cu in agent_cols
                     if all_collections.get(cu) and
                     all_collections[cu].collection_type == int(pedm_shared.CollectionType.CustomMachineCollection)}
@@ -349,11 +363,15 @@ def report_tenant_collections(plugin, all_collections):
         emit("  %-22s (type %-3s): %d" % (tname, ctype, len(by_type[ctype])))
     # detail the application collections specifically
     app_cols = [c for c in all_collections.values() if c.collection_type in APP_COLLECTION_TYPES]
-    sub("application collections (%d) -- if empty, KeeperFullInventory may be off" % len(app_cols))
+    SAMPLE = 25
+    sub("application collections (%d total) -- if 0, KeeperFullInventory may be off" % len(app_cols))
     if not app_cols:
         emit("    (none) -- no application collections exist. File inventory is disabled")
         emit("    by default in recent agents; enable it on a test machine to populate.")
-    for c in app_cols:
+    else:
+        emit("    showing first %d of %d as a sample (use --format json for all):"
+             % (min(SAMPLE, len(app_cols)), len(app_cols)))
+    for c in app_cols[:SAMPLE]:
         mask_vals = c.collection_type in IDENTITY_COLLECTION_TYPES
         data = {k: (mask_str(v) if mask_vals else v) for k, v in (c.collection_data or {}).items()}
         emit("    %-26s %-12s %s" % (c.collection_uid,
