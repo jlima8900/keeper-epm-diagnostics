@@ -83,6 +83,36 @@ Both tools end with the part that matters: a plain-English list of findings.
 | `--format json` | machine-readable output |
 | `--no-redact` | show identities/keys unredacted (internal use) |
 
+## Catching it live (`-Live`)
+
+When the complaint is "nothing happens when I try to elevate," a one-shot check
+isn't enough — you need to watch the moment it fails. `-Live` records a
+baseline, waits while you reproduce the elevation, then shows exactly what the
+agent did (or didn't do) in that window:
+
+```
+PS> .\epm_endpoint_check.ps1 -Live
+
+  LIVE CAPTURE -- reproduce the issue now
+  baseline at : 09:14:02
+  >>> Reproduce the elevation NOW, then press Enter: 
+
+  WHAT HAPPENED DURING YOUR 23s WINDOW
+  new log lines            : 0
+  keeper event-log entries : 0
+  scheduled tasks fired    : 0
+
+  LIVE VERDICT
+  The agent observed NOTHING during your reproduction.
+  => the request is NOT reaching the agent (Task Scheduler / user-session
+     layer). Matches 'agent history shows no requests'.
+```
+
+If those counters are **all zero**, the request never reached the agent — so
+the problem is the user-session/Task Scheduler layer, not your policy. If they
+move, the agent is reacting and you focus on the policy/approval decision
+instead. Run it elevated, ideally in the affected user's session.
+
 ## Good to know
 
 - **Read-only and sanitized** — nothing is changed; identities and secrets are
