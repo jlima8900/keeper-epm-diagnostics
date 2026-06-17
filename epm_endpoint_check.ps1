@@ -42,7 +42,8 @@ param(
     [string]$Region = "com",
     [string]$Output,
     [switch]$Raw,
-    [switch]$Json
+    [switch]$Json,
+    [switch]$Live
 )
 
 $ErrorActionPreference = "Continue"
@@ -118,6 +119,112 @@ function Test-Admin {
     } catch { return $false }
 }
 
+function Get-EpmPaths {
+    $cands = @(
+        "C:\Program Files\Keeper Security\Endpoint Privilege Management",
+        "C:\Program Files\Keeper Security\Endpoint Privilege Manager"
+    )
+    $base = $null
+    foreach ($c in $cands) { if (Test-Path $c) { $base = $c; break } }
+    if (-not $base) { $base = $cands[0] }
+    $pluginBin = Join-Path $base "Plugins\bin"
+    return [pscustomobject]@{
+        Base      = $base
+        PluginBin = $pluginBin
+        LogDir    = Join-Path $pluginBin "KeeperLogger\Log"
+    }
+}
+
+function Invoke-LiveCapture {
+    $paths  = Get-EpmPaths
+    $logDir = $paths.LogDir
+
+    Section "LIVE CAPTURE -- reproduce the issue now"
+    if (-not (Test-Path $logDir)) {
+        Emit "  WARNING: log dir not found ($logDir); still capturing events + tasks."
+    }
+
+    # ----- baseline -----
+    $t0 = Get-Date
+    $baseLines = @{}
+    if (Test-Path $logDir) {
+        foreach ($f in Get-ChildItem $logDir -File -ErrorAction SilentlyContinue) {
+            $baseLines[$f.FullName] = @(Get-Content $f.FullName -ErrorAction SilentlyContinue).Count
+        }
+    }
+    $baseReg = (Invoke-LocalApi "https://localhost:6889/api/Keeper/registration").IsRegistered
+    Emit ("  baseline at : " + $t0.ToString("HH:mm:ss"))
+    Emit ""
+    Emit "  >>> Reproduce the elevation NOW:"
+    Emit "      as the demoted standard user, try to install/run something that"
+    Emit "      should raise the Keeper elevation prompt."
+    Emit ""
+    [void](Read-Host "  Press Enter the moment you have finished the attempt")
+    $t1 = Get-Date
+    $elapsed = [int]($t1 - $t0).TotalSeconds
+
+    Section ("WHAT HAPPENED DURING YOUR " + $elapsed + "s WINDOW")
+
+    # ----- new log lines (handles rotation: new files counted from 0) -----
+    $newLog = New-Object System.Collections.Generic.List[string]
+    if (Test-Path $logDir) {
+        foreach ($f in Get-ChildItem $logDir -File -ErrorAction SilentlyContinue) {
+            $b = 0; if ($baseLines.ContainsKey($f.FullName)) { $b = $baseLines[$f.FullName] }
+            $all = @(Get-Content $f.FullName -ErrorAction SilentlyContinue)
+            if ($all.Count -gt $b) { for ($i = $b; $i -lt $all.Count; $i++) { $newLog.Add($all[$i]) } }
+        }
+    }
+    Item "new log lines" $newLog.Count
+    if ($newLog.Count -gt 0) {
+        Emit "  --- log lines written during the window (last 80) ---"
+        foreach ($l in ($newLog | Select-Object -Last 80)) { Emit ("    " + $l) }
+    }
+
+    # ----- Keeper-related Windows events in the window -----
+    $evCount = 0
+    try {
+        $ev = Get-WinEvent -FilterHashtable @{ LogName = @('Application','System'); StartTime = $t0; EndTime = $t1 } -ErrorAction SilentlyContinue |
+              Where-Object { $_.ProviderName -match 'Keeper' -or $_.Message -match 'Keeper' }
+        $evCount = @($ev).Count
+        Item "keeper event-log entries" $evCount
+        foreach ($e in (@($ev) | Select-Object -First 20)) {
+            Emit ("    [" + $e.TimeCreated.ToString("HH:mm:ss") + "] " + $e.ProviderName + ": " + (($e.Message -split "`n")[0]))
+        }
+    } catch { Item "event log" "query unavailable" }
+
+    # ----- scheduled tasks that fired during the window -----
+    $ranTasks = New-Object System.Collections.Generic.List[string]
+    try {
+        foreach ($t in Get-ScheduledTask -TaskPath "\Keeper Security\*" -ErrorAction SilentlyContinue) {
+            $lr = ($t | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue).LastRunTime
+            if ($lr -and $lr -ge $t0) { $ranTasks.Add($t.TaskName + " @ " + $lr.ToString("HH:mm:ss")) }
+        }
+    } catch {}
+    Item "scheduled tasks fired" $ranTasks.Count
+    foreach ($r in $ranTasks) { Emit ("    " + $r) }
+
+    # ----- registration change -----
+    $nowReg = (Invoke-LocalApi "https://localhost:6889/api/Keeper/registration").IsRegistered
+    if ($baseReg -ne $nowReg) { Item "registration changed" ("$baseReg -> $nowReg") }
+
+    Section "LIVE VERDICT"
+    if ($newLog.Count -eq 0 -and $evCount -eq 0 -and $ranTasks.Count -eq 0) {
+        Emit "  The agent observed NOTHING during your reproduction:"
+        Emit "    no new log lines, no Keeper events, no scheduled-task runs."
+        Emit "  => the elevation request is NOT reaching the agent. The interception /"
+        Emit "     user-session layer (Task Scheduler -> KeeperClient/keeperAgent) is the"
+        Emit "     prime suspect, and this matches 'agent history shows no requests'."
+        Emit "  Next: re-run WITHOUT -Live for the full static check and confirm the"
+        Emit "     \Keeper Security\ tasks exist and the plugin binaries are present."
+        Flag "Live capture: agent reacted to nothing during the reproduction window."
+    } else {
+        Emit "  The agent DID react during the window (see above): the request is"
+        Emit "  reaching the agent. Focus on the policy/approval decision -- grep the"
+        Emit "  new log lines for 'policy' / 'approval' / 'denied' and cross-check the"
+        Emit "  tenant-side report (epm_device_diag.py)."
+    }
+}
+
 # =========================================================================== #
 Section "KEEPER EPM ENDPOINT CHECK  (read-only$(if(-not $Raw){''}else{' -- UNREDACTED'}))"
 Emit ("  generated  : " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
@@ -130,6 +237,21 @@ if (-not $isAdmin) {
     Emit "  WARNING: not elevated -- localhost health endpoints will return 401/403."
     Emit "           Re-run from an Administrator PowerShell for full results."
     Flag "Run elevated: health endpoints unavailable without admin."
+}
+
+# ----- live capture short-circuits the static sweep -----
+if ($Live) {
+    Invoke-LiveCapture
+    Section "FINDINGS"
+    if ($script:Findings.Count -eq 0) { Emit "  (none flagged)" }
+    else { $i = 1; foreach ($f in $script:Findings) { Emit ("  {0}. {1}" -f $i, $f); $i++ } }
+    if ($Output) {
+        try {
+            $script:Lines -join "`r`n" | Out-File -FilePath $Output -Encoding utf8
+            Write-Host "`nWrote capture to $Output"
+        } catch { Write-Warning ("Could not write " + $Output + ": " + $_.Exception.Message) }
+    }
+    return
 }
 
 # --------------------------------------------------------------------------- #

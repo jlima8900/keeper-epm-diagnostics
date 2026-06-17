@@ -67,7 +67,23 @@ PowerShell 7.
 powershell -ExecutionPolicy Bypass -File .\epm_endpoint_check.ps1 -Region eu
 .\epm_endpoint_check.ps1 -Region eu -Output endpoint_report.txt
 .\epm_endpoint_check.ps1 -Raw          # show identities (internal use only)
+.\epm_endpoint_check.ps1 -Live         # time-boxed capture (see below)
 ```
+
+### `-Live` — capture a reproduction in real time
+
+A static check tells you the state *now*; `-Live` captures a **time window
+around a reproduction**. It records a baseline, prompts you to *reproduce the
+elevation attempt now*, waits for you to press Enter, then reports everything
+that changed in that window: new KeeperLogger log lines, Keeper-related Windows
+event-log entries, `\Keeper Security\` scheduled-task runs, and registration
+state.
+
+This is the strongest test for "nothing happens when I try to elevate": if the
+window shows **no new log lines, no events, and no task runs**, the request
+never reached the agent — pointing at the user-session / Task Scheduler layer
+rather than policy. Run it elevated, as the affected user's session where
+possible.
 
 It checks the service, ports 6888/6889/8675, plugin binaries, the
 `\Keeper Security\` scheduled tasks, `currentPolicies.json`, the latest
