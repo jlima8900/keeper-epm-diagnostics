@@ -297,14 +297,20 @@ $plugs  = Invoke-LocalApi "https://localhost:6889/api/plugins"
 if ($health.__error) { Item "/health" ("FAIL: " + $health.__error) "service not responding"; Flag "Health endpoint unreachable: $($health.__error)" }
 else { Item "/health" ($health | ConvertTo-Json -Compress -Depth 4) }
 
-if ($reg.__error) { Item "/registration" ("FAIL: " + $reg.__error) }
+if ($reg.__error) {
+    $note = if ($reg.__error -match '403|401') { "auth-gated (token needed); not necessarily broken" } else { "endpoint not responding" }
+    Item "/registration" ("unavailable: " + $reg.__error) $note
+}
 else {
     $isReg = $reg.IsRegistered
     Item "IsRegistered" $isReg ($(if ($isReg -ne $true) { "NOT REGISTERED" } else { "" }))
     if ($isReg -ne $true) { Flag "Agent reports IsRegistered != true." }
 }
 
-if ($plugs.__error) { Item "/api/plugins" ("FAIL: " + $plugs.__error) }
+if ($plugs.__error) {
+    $note = if ($plugs.__error -match '403|401') { "auth-gated (token needed); not necessarily broken" } else { "endpoint not responding" }
+    Item "/api/plugins" ("unavailable: " + $plugs.__error) $note
+}
 else {
     $plist = if ($plugs.plugins) { $plugs.plugins } else { $plugs }
     foreach ($pl in $plist) {
@@ -386,9 +392,12 @@ if (Test-Path $logDir) {
         Item "  modified" $latest.LastWriteTime
         try {
             $tail = Get-Content $latest.FullName -Tail 2000 -ErrorAction SilentlyContinue
-            $merge = $tail | Select-String "Local policy merge complete" | Select-Object -Last 1
-            $secfail = $tail | Select-String "Plugin failed security validation" | Select-Object -Last 1
-            Item "  policy merge line" ($(if ($merge) { $merge.Line.Trim() } else { "not seen in tail" }))
+            $merge = $tail | Select-String "policy merge complete|policies\s*=|merged.*polic" | Select-Object -Last 1
+            if (-not $merge) { $merge = $tail | Select-String "polic" | Select-Object -Last 1 }
+            $secfail = $tail | Select-String "Plugin failed security validation|security validation failed" | Select-Object -Last 1
+            $mline = if ($merge) { $merge.Line.Trim() } else { "no 'policy' lines in last 2000" }
+            if ($mline.Length -gt 200) { $mline = $mline.Substring(0,200) + " ..." }
+            Item "  latest policy log line" $mline
             if ($secfail) {
                 Item "  SECURITY VALIDATION" $secfail.Line.Trim() "plugin failed validation"
                 Flag "Log shows 'Plugin failed security validation'."
@@ -400,12 +409,19 @@ if (Test-Path $logDir) {
 }
 
 # --------------------------------------------------------------------------- #
-Section "9. .NET RUNTIME (.NET 8 required)"
-try {
-    $rt = & dotnet --list-runtimes 2>$null
-    $net8 = $rt | Select-String "Microsoft.NETCore.App 8\."
-    if ($net8) { Item ".NET 8 runtime" "present" } else { Item ".NET 8 runtime" "NOT FOUND" "install .NET 8"; Flag ".NET 8 runtime not detected." }
-} catch { Item "dotnet" "not on PATH (may still be bundled)" }
+Section "9. .NET RUNTIME (.NET 8)"
+$net8 = $false
+try { $rt = & dotnet --list-runtimes 2>$null; if ($rt -match "Microsoft\.NETCore\.App 8\.") { $net8 = $true } } catch {}
+if (-not $net8) {
+    foreach ($shared in @("C:\Program Files\dotnet\shared\Microsoft.NETCore.App",
+                          "C:\Program Files (x86)\dotnet\shared\Microsoft.NETCore.App")) {
+        if (Test-Path $shared) {
+            if (Get-ChildItem $shared -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "8.*" }) { $net8 = $true; break }
+        }
+    }
+}
+if ($net8) { Item ".NET 8 runtime" "present (system-wide)" }
+else { Item ".NET 8 runtime" "not found on PATH or in shared runtimes -- the agent may bundle its own; only a concern if the service fails to start" }
 
 # --------------------------------------------------------------------------- #
 Section "10. CONNECTIVITY (Keeper router: $Region)"
@@ -456,7 +472,7 @@ Emit @"
   - Binaries missing       -> install is corrupt; clean reinstall.
   - Not registered         -> force re-register (recreates tasks):
       curl -X POST "https://localhost:6889/api/Keeper/register?token=<token>&force=true" --insecure
-  - DNS/443 fails           -> open egress to connect.keepersecurity.$Region:443; recheck proxy/EDR.
+  - DNS/443 fails           -> open egress to connect.keepersecurity.${Region}:443; recheck proxy/EDR.
   - After any fix           -> restart the Keeper endpoint service, then log the user out and back in.
 "@
 

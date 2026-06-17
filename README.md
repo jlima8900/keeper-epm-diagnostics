@@ -91,6 +91,14 @@ KeeperLogger log, `.NET 8`, DNS/egress to the Keeper router, EDR presence, and
 local Administrators membership — then prints a findings list and suggested
 (manual) remediation. `-Region` accepts `com | eu | us | com.au | jp`.
 
+> **Note on the health endpoints.** `https://localhost:6889/health` is an
+> unauthenticated liveness probe and is the reliable signal. Depending on the
+> agent build, `/api/Keeper/registration` and `/api/plugins` may return **403**
+> even from an elevated session (they are token-gated) — the tool labels that
+> as *auth-gated, not necessarily broken*, so don't read a 403 as a failure on
+> its own. The install path is `...\Endpoint Privilege Manager\` (the tool also
+> checks the `...Management\` spelling some docs use).
+
 ## Privacy / sanitization
 
 By **default** the report redacts:
@@ -110,13 +118,20 @@ before sharing it externally.
   asks you to run `keeper login` — it never submits an empty password, so it
   cannot trigger an account lockout.
 
-## Caveat
+## Validation
 
-The entity sections (agents, policies, collections, approvals) are built
-directly against the Commander library API. The **audit-event section** drives
-Commander's own report engine; confirm its output against your live tenant the
-first time you run it. If that query fails, the tool degrades gracefully and
-points you at `epm report event` in an interactive Commander session.
+Both tools have been run end-to-end against live infrastructure:
+
+- `epm_device_diag.py` — against a live tenant, including the audit-event path
+  (events returned, statuses decoded, identities masked) and the policy-reach
+  verdict logic.
+- `epm_endpoint_check.ps1` — on a live Windows Server 2022 endpoint running the
+  EPM agent (PowerShell 5.1), all 12 sections plus the findings/remediation
+  output.
+
+The audit-event section of the Python tool drives Commander's own report
+engine; if that query ever fails on a different tenant it degrades gracefully
+and points you at `epm report event` in an interactive Commander session.
 
 ## License
 
