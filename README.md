@@ -1,12 +1,19 @@
 # keeper-epm-diagnostics
 
-A **read-only** diagnostic gatherer for [Keeper Endpoint Privilege Manager
-(EPM)](https://docs.keeper.io/en/keeperpam/endpoint-privilege-manager). It runs
-on your admin workstation, talks to the Keeper backend through the
-[Commander](https://github.com/Keeper-Security/Commander) Python library, and
-produces a single, sanitized report you can attach to a support case.
+**Read-only** diagnostics for [Keeper Endpoint Privilege Manager
+(EPM)](https://docs.keeper.io/en/keeperpam/endpoint-privilege-manager),
+producing sanitized reports you can attach to a support case. Neither tool makes
+any change — they only read.
 
-It performs **no delete or modify operations** — it only reads.
+There are two tools, because EPM problems split across two machines:
+
+| Tool | Runs on | Needs Keeper login? | Answers |
+|---|---|---|---|
+| **`epm_device_diag.py`** | admin workstation | yes (Commander session) | tenant view: is an enforce policy reaching the device? approvals? audit events? |
+| **`epm_endpoint_check.ps1`** | the Windows endpoint | **no** ("keeperless") | local view: service health, ports, plugin binaries, scheduled tasks, policy sync, logs, DNS, EDR |
+
+Run them together: the `.py` tells you what the backend thinks should happen,
+the `.ps1` tells you what's actually true on the box.
 
 ## What it's for
 
@@ -34,7 +41,7 @@ pip install keepercommander
 keeper login
 ```
 
-## Usage
+## Usage — tenant side (`epm_device_diag.py`, on the admin workstation)
 
 ```bash
 python epm_device_diag.py                          # summary of all agents
@@ -48,6 +55,25 @@ python epm_device_diag.py --no-redact              # show identities + keys (int
 
 It reads your Commander config from `~/.keeper/config.json`
 (`C:\Users\<you>\.keeper\config.json` on Windows).
+
+## Usage — endpoint side (`epm_endpoint_check.ps1`, on the Windows endpoint)
+
+No Keeper login, no Python, no Commander — pure PowerShell, so it runs on a
+clean endpoint. Run it from an **elevated** PowerShell (the localhost health
+endpoints return 401/403 without admin). Works on Windows PowerShell 5.1 and
+PowerShell 7.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\epm_endpoint_check.ps1 -Region eu
+.\epm_endpoint_check.ps1 -Region eu -Output endpoint_report.txt
+.\epm_endpoint_check.ps1 -Raw          # show identities (internal use only)
+```
+
+It checks the service, ports 6888/6889/8675, plugin binaries, the
+`\Keeper Security\` scheduled tasks, `currentPolicies.json`, the latest
+KeeperLogger log, `.NET 8`, DNS/egress to the Keeper router, EDR presence, and
+local Administrators membership — then prints a findings list and suggested
+(manual) remediation. `-Region` accepts `com | eu | us | com.au | jp`.
 
 ## Privacy / sanitization
 
