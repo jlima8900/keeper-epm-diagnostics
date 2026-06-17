@@ -96,13 +96,13 @@ class FailClosedUi(LoginUi):
 
 
 # --------------------------------------------------------------------------- #
-# Output: write to stdout and (optionally) buffer for --output
+# Output: buffered so the summary can be assembled on top before printing
 # --------------------------------------------------------------------------- #
-_BUF = []
+_BUF = []        # detail body
+SUMMARY = []     # one-line-per-device verdicts, shown at the top
 
 
 def emit(line=""):
-    print(line)
     _BUF.append(line)
 
 
@@ -315,11 +315,20 @@ def report_agent(p, plugin, agent, online, all_collections, policies, all_agents
         if str(ptype) in ("PrivilegeElevation", "1") and status == "enforce":
             enforce_elev += 1
 
+    n_appr = sum(1 for ap in plugin.approvals.get_all_entities() if ap.agent_uid == agent.agent_uid)
     sub("verdict for this device")
     emit("    online .................. %s" % ("YES" if is_online else "NO"))
     emit("    in a machine collection . %s" % ("YES" if machine_cols else "NO"))
     emit("    reached by any policy ... %s" % ("YES" if reaching else "NO"))
     emit("    enforce elevation policy  %s" % ("YES" if enforce_elev else "NO  <-- likely root cause"))
+    emit("    approval requests ....... %d" % n_appr)
+
+    SUMMARY.append(
+        "  %-28s online=%-3s machine-coll=%-3s policy=%-3s enforce-elev=%-3s approvals=%d%s"
+        % (machine or agent.agent_uid,
+           "YES" if is_online else "NO", "YES" if machine_cols else "NO",
+           "YES" if reaching else "NO", "YES" if enforce_elev else "NO", n_appr,
+           "   <-- likely root cause" if not enforce_elev else ""))
 
     # ----- approvals for this device -----
     report_approvals(plugin, agent.agent_uid)
@@ -613,24 +622,40 @@ def main():
                 f.write(out)
         return
 
-    # ----- text report -----
-    section("EPM DEVICE DIAGNOSTIC  (read-only%s)" % ("" if REDACT else " -- UNREDACTED"))
-    emit("  generated : %s" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    emit("  tenant    : %d agents (%d online), %d policies, %d collections"
-         % (len(list(plugin.agents.get_all_entities())), len(online), len(policies), len(all_collections)))
-    emit("  scope     : %s" % (args.agent or args.machine or "ALL agents"))
-    if not scope:
-        emit("  WARNING: no agents matched the filter.")
-
+    # ----- text report: build the detail body first (fills _BUF + SUMMARY) -----
     report_tenant_collections(plugin, all_collections)
     for a in scope:
         report_agent(p, plugin, a, online, all_collections, policies, all_agents_uid)
     report_audit_events(p, scope, args.days)
     endpoint_checklist()
 
+    # ----- assemble summary-first, then the detail -----
+    app_cols = sum(1 for c in all_collections.values() if c.collection_type in APP_COLLECTION_TYPES)
+    head = []
+    head.append("=" * 78)
+    head.append("  EPM DEVICE DIAGNOSTIC  (read-only%s)" % ("" if REDACT else " -- UNREDACTED"))
+    head.append("=" * 78)
+    head.append("  generated : %s" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    head.append("  tenant    : %d agents (%d online), %d policies, %d collections"
+                % (len(list(plugin.agents.get_all_entities())), len(online), len(policies), len(all_collections)))
+    head.append("  scope     : %s" % (args.agent or args.machine or "ALL agents"))
+    head.append("")
+    head.append("=" * 78)
+    head.append("  SUMMARY")
+    head.append("=" * 78)
+    if not scope:
+        head.append("  no agents matched the filter '%s'." % (args.agent or args.machine))
+    elif SUMMARY:
+        head.extend(SUMMARY)
+    head.append("  application collections in tenant: %d%s"
+                % (app_cols, "  (0 -> KeeperFullInventory may be off)" if app_cols == 0 else ""))
+    head.append("  full detail follows below.")
+
+    final = "\n".join(head + _BUF)
+    print(final)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
-            f.write("\n".join(_BUF) + "\n")
+            f.write(final + "\n")
         if not REDACT:
             print("\nWARNING: %s contains UNREDACTED identities/keys." % args.output, file=sys.stderr)
         else:

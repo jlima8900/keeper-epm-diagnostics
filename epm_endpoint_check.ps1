@@ -54,7 +54,33 @@ $script:Findings = New-Object System.Collections.Generic.List[string]
 # --------------------------------------------------------------------------- #
 # output helpers
 # --------------------------------------------------------------------------- #
-function Emit([string]$s = "") { Write-Host $s; $script:Lines.Add($s) }
+function Emit([string]$s = "") { $script:Lines.Add($s) }            # buffered; flushed at end
+function EmitLive([string]$s = "") { Write-Host $s; $script:Lines.Add($s) }  # also shown immediately (prompts)
+
+function Flush-Report {
+    # assemble a summary-first report, print it, and optionally write it to a file
+    $out = New-Object System.Collections.Generic.List[string]
+    $out.Add("=" * 78)
+    $out.Add("  SUMMARY -- " + $env:COMPUTERNAME + $(if ($Raw) { "  (UNREDACTED)" } else { "" }))
+    $out.Add("=" * 78)
+    if ($script:Findings.Count -eq 0) {
+        $out.Add("  No blocking issues found by the local checks.")
+    } else {
+        $out.Add("  " + $script:Findings.Count + " finding(s) -- act on these first:")
+        $n = 1; foreach ($f in $script:Findings) { $out.Add("    $n. $f"); $n++ }
+    }
+    $out.Add("  Full detail follows below.")
+    $out.Add("")
+    foreach ($l in $script:Lines) { $out.Add($l) }
+    $text = $out -join "`r`n"
+    Write-Host $text
+    if ($Output) {
+        try {
+            $text | Out-File -FilePath $Output -Encoding utf8
+            if ($Raw) { Write-Warning "$Output contains UNREDACTED identities." } else { Write-Host "`nWrote report to $Output" }
+        } catch { Write-Warning ("Could not write " + $Output + ": " + $_.Exception.Message) }
+    }
+}
 function Section([string]$t) {
     Emit ""
     Emit ("=" * 78)
@@ -153,12 +179,12 @@ function Invoke-LiveCapture {
         }
     }
     $baseReg = (Invoke-LocalApi "https://localhost:6889/api/Keeper/registration").IsRegistered
-    Emit ("  baseline at : " + $t0.ToString("HH:mm:ss"))
-    Emit ""
-    Emit "  >>> Reproduce the elevation NOW:"
-    Emit "      as the demoted standard user, try to install/run something that"
-    Emit "      should raise the Keeper elevation prompt."
-    Emit ""
+    EmitLive ("  baseline at : " + $t0.ToString("HH:mm:ss"))
+    EmitLive ""
+    EmitLive "  >>> Reproduce the elevation NOW:"
+    EmitLive "      as the demoted standard user, try to install/run something that"
+    EmitLive "      should raise the Keeper elevation prompt."
+    EmitLive ""
     [void](Read-Host "  Press Enter the moment you have finished the attempt")
     $t1 = Get-Date
     $elapsed = [int]($t1 - $t0).TotalSeconds
@@ -242,15 +268,7 @@ if (-not $isAdmin) {
 # ----- live capture short-circuits the static sweep -----
 if ($Live) {
     Invoke-LiveCapture
-    Section "FINDINGS"
-    if ($script:Findings.Count -eq 0) { Emit "  (none flagged)" }
-    else { $i = 1; foreach ($f in $script:Findings) { Emit ("  {0}. {1}" -f $i, $f); $i++ } }
-    if ($Output) {
-        try {
-            $script:Lines -join "`r`n" | Out-File -FilePath $Output -Encoding utf8
-            Write-Host "`nWrote capture to $Output"
-        } catch { Write-Warning ("Could not write " + $Output + ": " + $_.Exception.Message) }
-    }
+    Flush-Report
     return
 }
 
@@ -477,13 +495,7 @@ Emit @"
 "@
 
 # --------------------------------------------------------------------------- #
-if ($Output) {
-    try {
-        $script:Lines -join "`r`n" | Out-File -FilePath $Output -Encoding utf8
-        if (-not $Raw) { Write-Host "`nWrote report to $Output" }
-        else { Write-Warning "$Output contains UNREDACTED identities." }
-    } catch { Write-Warning ("Could not write " + $Output + ": " + $_.Exception.Message) }
-}
+Flush-Report
 if ($Json) {
     $script:Result["host"] = $env:COMPUTERNAME
     $script:Result["findings"] = $script:Findings
