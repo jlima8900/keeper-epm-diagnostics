@@ -423,22 +423,33 @@ $extra = @($present | Where-Object { $critical -notcontains $_ } | Sort-Object)
 if ($extra.Count -gt 0) { Item "other components" ($extra -join ", ") }
 
 # --------------------------------------------------------------------------- #
-Section "6. SCHEDULED TASKS (Keeper, any path)"
-# The launcher task is typically '\KeeperClient Startup' at the root path --
-# not under '\Keeper Security\', so search every path.
-try {
-    $tasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match 'Keeper' -or $_.TaskPath -match 'Keeper' })
-    if ($tasks.Count -eq 0) {
-        Item "Keeper tasks" "NONE FOUND" "no Keeper scheduled task on any path"
-        Flag "No Keeper scheduled task found (any path) -- the user-session launcher may be missing (reinstall recreates it)."
-    } else {
-        foreach ($t in $tasks) {
-            $state = $t.State
-            Item ($t.TaskPath + $t.TaskName) $state ($(if ($state -eq "Disabled") { "DISABLED" } else { "" }))
-            if ($state -eq "Disabled") { Flag "Scheduled task '$($t.TaskName)' is Disabled." }
-        }
+Section "6. USER-SESSION LAUNCHER (process + tasks)"
+# The session component (KeeperClient/KeeperUSession) can be launched by a
+# standing scheduled task ('\KeeperClient Startup') OR dynamically by a job
+# trigger. So the real signal is: is the PROCESS running? A missing scheduled
+# task alone is NOT a problem if the process is up.
+$proc = @()
+try { $proc = @(Get-Process -Name "KeeperClient","KeeperUSession" -ErrorAction SilentlyContinue) } catch {}
+$tasks = @()
+try { $tasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match 'Keeper' -or $_.TaskPath -match 'Keeper' }) } catch {}
+
+if ($proc.Count -gt 0) {
+    Item "session process running" (($proc | Select-Object -Expand ProcessName -Unique) -join ", ")
+} else {
+    Item "session process running" "NO" "KeeperClient/KeeperUSession not running"
+}
+if ($tasks.Count -gt 0) {
+    foreach ($t in $tasks) {
+        Item ($t.TaskPath + $t.TaskName) $t.State ($(if ($t.State -eq "Disabled") { "DISABLED" } else { "" }))
+        if ($t.State -eq "Disabled") { Flag "Scheduled task '$($t.TaskName)' is Disabled." }
     }
-} catch { Item "scheduled tasks" ("error: " + $_.Exception.Message) }
+} else {
+    Item "Keeper scheduled tasks" "none (this build may launch via a job trigger instead)"
+}
+# Only a real problem if NEITHER the process is running NOR a task exists
+if ($proc.Count -eq 0 -and $tasks.Count -eq 0) {
+    Flag "User-session launcher absent: KeeperClient/KeeperUSession not running and no Keeper scheduled task."
+}
 
 # --------------------------------------------------------------------------- #
 Section "7. POLICY SYNC STATE"
@@ -497,6 +508,37 @@ if (Test-Path $logDir) {
     }
 } else {
     Flag "KeeperLogger log directory not found (check 'Management' vs 'Manager' in the path)."
+}
+
+# --------------------------------------------------------------------------- #
+Section "8b. POLICY ENFORCEMENT (from recent log)"
+# Distinguishes a healthy agent whose policies are in MONITOR/disabled (a
+# tenant-side config issue) from an actual endpoint failure.
+$plog = $null
+try { $plog = Get-ChildItem $logDir -File -Filter "KeeperLogger2*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 } catch {}
+if ($plog) {
+    $lt = Get-Content $plog.FullName -Tail 5000 -ErrorAction SilentlyContinue
+    $evals    = @($lt | Select-String "POLICY\.EVALUATION|policy_evaluation|PolicyEvaluationOrchestrator").Count
+    $disabled = @($lt | Select-String "EnforcementDisabled").Count
+    $applic0  = @($lt | Select-String "ApplicablePolicies: 0").Count
+    $reg      = $lt | Select-String "Total policies in registry" | Select-Object -Last 1
+    Item "policy evaluations (recent)" $evals
+    Item "  -> EnforcementDisabled" $disabled
+    Item "  -> ApplicablePolicies=0" $applic0
+    if ($reg) {
+        $rl = ($reg.Line -replace '.*(Total policies in registry.*)', '$1').Trim()
+        if ($rl.Length -gt 160) { $rl = $rl.Substring(0, 160) + " ..." }
+        Item "  registry state" $rl
+    }
+    if ($disabled -gt 0) {
+        Emit "  The agent IS evaluating requests, but enforcement is OFF / no policy applies."
+        Emit "  => endpoint healthy; this points TENANT-SIDE. Set the elevation policy to"
+        Emit "     ENFORCE (not monitor) and confirm its scope (machine/user/app collections)"
+        Emit "     covers this device + the user + the apps being tested."
+        Flag "Policy evaluations return EnforcementDisabled -- check enforce mode + policy scope on the tenant (this is NOT an endpoint problem)."
+    }
+} else {
+    Item "policy enforcement" "no KeeperLogger log to analyze"
 }
 
 # --------------------------------------------------------------------------- #
