@@ -16,21 +16,37 @@ They never change anything, and they redact identities and secrets by default.
 Rule of thumb: the `.ps1` says what's **actually happening on the box**; the
 `.py` says what **should** be happening.
 
-## Quick start
+## Step-by-step
 
-**On the Windows endpoint** (no Keeper login needed) — run from an elevated PowerShell:
+### On the Windows endpoint (the machine with the problem)
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\epm_endpoint_check.ps1
-```
+No Keeper login and no Python needed — just PowerShell.
 
-**On your admin machine** (needs Keeper Commander):
+1. Copy **`epm_endpoint_check.ps1`** onto the machine (anywhere, e.g. your Downloads folder).
+2. Open PowerShell **as administrator**: click **Start**, type `PowerShell`,
+   right-click it, choose **Run as administrator**.
+3. Go to the folder where you put the file, for example:
+   ```powershell
+   cd $env:USERPROFILE\Downloads
+   ```
+4. Run it:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\epm_endpoint_check.ps1
+   ```
+5. Read the **SUMMARY** at the top — it lists what's wrong. To save/share it,
+   add `-Output report.txt` and send that file.
+
+*(To capture a live reproduction, add `-Live` and follow the on-screen prompt.)*
+
+### On your admin machine (the tenant view)
 
 ```bash
-pip install keepercommander
-keeper login
+pip install keepercommander          # once
+keeper login                         # start a Keeper session
 python epm_device_diag.py --machine HOST-01
 ```
+
+The device's verdict is at the top of the output; add `--output report.txt` to save it.
 
 ## What the output looks like
 
