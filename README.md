@@ -10,7 +10,7 @@ They never change anything, and they redact identities and secrets by default.
 
 | Tool | Runs on | Tells you |
 |---|---|---|
-| **`epm_endpoint_check.ps1`** | the Windows endpoint | Is the agent healthy on the box? Service, ports, plugins, scheduled tasks, logs. |
+| **`epm_endpoint_check.ps1`** | the Windows endpoint | Is the agent healthy on the box? Services, ports, plugins, the user-session launcher, logs, and whether policies are actually **enforcing**. |
 | **`epm_device_diag.py`** | your admin machine | What the backend thinks: is an *enforce* policy actually reaching this device? approvals? events? |
 
 Rule of thumb: the `.ps1` says what's **actually happening on the box**; the
@@ -57,25 +57,39 @@ The device's verdict is at the top of the output; add `--output report.txt` to s
 
 ## What the output looks like
 
-Both tools end with the part that matters: a plain-English list of findings.
+Both tools lead with a **SUMMARY** of findings, then the detail below.
 
-**Endpoint check** (condensed):
+**Endpoint check** (`epm_endpoint_check.ps1`, condensed) — a healthy agent whose
+elevation policy simply isn't enforcing:
 
 ```
-  host       : HOST-01
-  2. WINDOWS SERVICE    : Running
-  3. /health            : "Healthy"
-  4. PORTS 6888/6889/8675 : listening
-  5. PLUGIN BINARIES    : KeeperApproval.exe  <-- MISSING
-  6. SCHEDULED TASKS    : NONE under \Keeper Security\
-
-  FINDINGS
-  1. Plugin binary missing: KeeperApproval.exe (corrupt install -> reinstall).
-  2. No scheduled tasks under '\Keeper Security\' -- user-session components
-     cannot launch (reinstall recreates them).
+==============================================================================
+  SUMMARY -- HOST-01
+==============================================================================
+  1 finding(s) -- act on these first:
+    1. Policy evaluations return EnforcementDisabled -- check enforce mode +
+       policy scope on the tenant (this is NOT an endpoint problem).
+  Full detail follows below.
+  ...
+  2. WINDOWS SERVICES (Keeper)
+       Keeper Endpoint Privilege Manager : Running
+       Keeper Watchdog Service           : Running
+  5. PLUGIN BINARIES
+       exe files found : 9   (keeperAgent, KeeperApi, KeeperClient,
+                              KeeperMessage, KeeperPolicy, KeeperUSession all present)
+  6. USER-SESSION LAUNCHER (process + tasks)
+       session process running : KeeperClient, KeeperUSession
+  8b. POLICY ENFORCEMENT (from recent log)
+       policy evaluations (recent) : 112
+         -> EnforcementDisabled    : 112
+         -> ApplicablePolicies=0   : 27
+       => endpoint healthy; set the policy to ENFORCE and confirm its scope
+          covers this device + user + apps (a tenant-side fix, not a reinstall).
 ```
 
-**Device diagnostic** — the per-device verdict:
+A genuinely healthy, enforcing box instead reports `No blocking issues found`.
+
+**Device diagnostic** (`epm_device_diag.py`) — the per-device verdict:
 
 ```
   --- verdict for this device ---
@@ -107,13 +121,15 @@ Both tools end with the part that matters: a plain-English list of findings.
 | `-Output report.txt` | also write the report to a file |
 | `-Bundle` | build a support bundle (report + recent KeeperLogger logs + `currentPolicies.json`) as one `.zip` in `C:\temp` (change with `-BundlePath`) |
 | `-Live` | capture a window: press Enter, reproduce the elevation, see exactly what the agent did (or didn't do) |
+| `-Json` | machine-readable output |
 | `-Raw` | show identities unredacted (internal use) |
 
 `epm_device_diag.py`:
 
 | Flag | Effect |
 |---|---|
-| `--machine HOST` | focus a device by name |
+| `--machine HOST` | focus device(s) by name (substring) |
+| `--agent <UID>` | focus a single agent by UID |
 | `--days 14` | audit-event lookback (default 7) |
 | `--output report.txt` | also write the report to a file |
 | `--format json` | machine-readable output |
@@ -157,7 +173,8 @@ instead. Run it elevated, ideally in the affected user's session.
   than risk submitting a bad password.
 - **PowerShell** — runs on Windows PowerShell 5.1 or 7; run it elevated.
 - `/health` is the reliable liveness check; `/registration` and `/api/plugins`
-  can return `403` (token-gated) even when the agent is fine.
+  can return `403` (`SelectiveAuth` needs an authenticated Admin session, so a
+  plain probe is denied) even when the agent is perfectly fine.
 
 ## License
 
