@@ -1,0 +1,17 @@
+# diagnostic output -- never commit, may contain tenant data
+*.txt
+report*.json
+*.log
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ruff_cache/
+.pytest_cache/
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
