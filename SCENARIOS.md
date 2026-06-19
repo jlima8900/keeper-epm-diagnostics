@@ -30,15 +30,15 @@ matched.
 | 12 | **Policy file not synced** | `currentPolicies.json` missing or ~empty | "policy sync may not have completed" |
 | 13 | **Plugin failed security validation** | Log line "Plugin failed security validation" | Flags it with the log path |
 | 14 | **Policy reaches the box but isn't enforcing** | Many evaluations return `EnforcementDisabled` / `ApplicablePolicies=0` | "endpoint healthy; set the policy to ENFORCE and confirm scope — **tenant-side fix, not a reinstall**" |
-| 15 | **Agent can't launch onto the user's desktop** | `UserSessionLauncher LAUNCH_FAILED ... on user desktop` (approval popup and/or approved app) | Flags the launch failure; tells you to check `qwinsta` (console vs `rdp-tcp`, `Active` vs `Disc`) before escalating |
-| 16 | **...and the agent sees no active user session** | The above **plus** `WindowsUserDetection: Found 0 active user session(s)` | **Strong signal**: the Keeper popup and approved apps will never appear — a console-vs-RDP / disconnected-session targeting problem. Routes you: if the user is on `rdp-tcp`/`Disc`, retest on the **active console**; if the user is Active on the console and the agent still sees 0 sessions, **escalate to engineering** with these log lines |
+| 15 | **Agent can't launch onto the user's desktop — but it DID resolve the user** | `WTS_SESSION_SELECTED` / `Found 1 active user session`, then `WindowsTaskSchedulerLauncher SCHTASKS_ERROR` ("cannot find the file specified") + `PROCESS_DETECTION_FAILED` + `USER_DESKTOP_TASK_LAUNCH_RESULT ... Launched: False` → `LAUNCH_FAILED ... on user desktop` | **Agent-side launch defect.** The session targeting is fine (the agent found the logged-on user); its Task Scheduler launcher still couldn't spawn the process, so the Keeper approval popup and approved apps never start. **Reproduces from the console too**, so it's *not* an RDP/console issue → **escalate to Keeper engineering** with the launcher failure chain (+ any WinTrust `CRYPT_E_FILE_ERROR 0x80092003` where the agent couldn't read the target `.exe`). |
+| 16 | **Agent can't launch AND genuinely saw 0 active sessions** | `LAUNCH_FAILED` with `Found 0 active user session(s)` and **no** `WTS_SESSION_SELECTED` in the window | Nobody was logged on, or a real session-targeting gap. Confirm with `qwinsta` during a repro: if the user shows `Active` (console *or* `rdp-tcp`) yet the agent still sees 0 → engineering; otherwise just reproduce while the user is actively logged on. (Note: idle/overnight `Found 0` lines are normal — only count it when it coincides with a repro.) |
 | 17 | **Live capture: nothing happened** (`-Live`) | During the reproduction window: 0 new log lines, 0 events, 0 tasks fired | The request never reached the agent — it's the **user-session / Task Scheduler** layer, not the policy |
 | 18 | **.NET 8 runtime not found** | No system-wide .NET 8 | Informational — the agent may bundle its own; only a concern if the service won't start |
 
 **Symptom → scenario shortcuts**
 
-- *"Only the Windows UAC prompt shows, never the Keeper approval popup"* → **#15/#16** (the popup can't render onto the user's session).
-- *"The app was approved but never actually starts"* → **#15/#16** (approval succeeds, launch into the desktop fails).
+- *"Only the Windows UAC prompt shows, never the Keeper approval popup"* → **#15/#16** (the popup process never spawns onto the user's session).
+- *"The app was approved but the Launch button / app never actually starts"* → **#15/#16** (approval succeeds, the agent's launch into the desktop fails). If it fails the same way from **both RDP and the physical console**, it's #15 (agent launcher defect → engineering), not a session-targeting issue.
 - *"Nothing happens at all when I try to elevate"* → run with `-Live` → **#17**.
 - *"Elevation is allowed when it shouldn't be / blocked when it shouldn't be"* → **#14** (policy scope/enforce mode, tenant-side).
 

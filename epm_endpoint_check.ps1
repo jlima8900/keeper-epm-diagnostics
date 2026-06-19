@@ -506,22 +506,40 @@ if (Test-Path $logDir) {
             }
 
             # user-session launch failures: the agent cannot place the Keeper popup
-            # OR the approved app onto the user's interactive desktop. Almost always
-            # an RDP / non-console / disconnected-session targeting problem -- it
-            # explains BOTH "no Keeper popup (only UAC)" and "approved app never starts".
-            $launchFail = @($tail | Select-String "LAUNCH_FAILED|Failed to launch .* on user desktop|LAUNCH_APPROVAL_NON_ELEVATED_FAILED")
-            $noSession  = @($tail | Select-String "Found 0 active user session|WTSUserName for session 1: ''")
-            if ($launchFail.Count -gt 0) {
-                Item "  USER-SESSION LAUNCH FAILURES" "$($launchFail.Count) (agent could not launch on the user desktop)"
-                foreach ($lf in ($launchFail | Select-Object -Last 3)) {
+            # OR the approved app onto the user's interactive desktop. This explains
+            # BOTH "no Keeper popup (only UAC)" and "approved app never starts".
+            #
+            # Two DIFFERENT root causes -- the detection separates them, because the
+            # next step is opposite:
+            #   (A) the agent never resolved an active user session (it really saw 0)
+            #       -> session targeting / nobody-logged-on. Confirm with qwinsta.
+            #   (B) the agent DID resolve the active user (e.g. "Selected user X in
+            #       session N", "Found 1 active user session") but the launch still
+            #       failed via WindowsTaskSchedulerLauncher (schtasks error +
+            #       PROCESS_DETECTION_FAILED + Launched: False). The session is fine;
+            #       the agent's own user-desktop launcher is broken on this box.
+            #       This is an AGENT defect -> Keeper engineering, NOT an environment
+            #       or RDP/console issue (it reproduces from console too).
+            $launchFail = @($tail | Select-String "LAUNCH_FAILED|Failed to launch .* on user desktop|LAUNCH_APPROVAL_NON_ELEVATED_FAILED|WINDOWS_LAUNCH_FAILED")
+            $schFail    = @($tail | Select-String "PROCESS_DETECTION_FAILED|SCHTASKS_ERROR|USER_DESKTOP_TASK_LAUNCH_RESULT.*Launched: False")
+            $sawUser    = @($tail | Select-String "Found [1-9][0-9]* active user session|WTS_SESSION_SELECTED|SESSION_LOOKUP_SUCCESS")
+            $noUser     = @($tail | Select-String "Found 0 active user session")
+            $sigReadErr = @($tail | Select-String "SIGNATURE_VERIFICATION_FAILED.*CRYPT_E_FILE_ERROR|0x80092003")
+            if ($launchFail.Count -gt 0 -or $schFail.Count -gt 0) {
+                Item "  USER-SESSION LAUNCH FAILURES" "$($launchFail.Count) launch-failed, $($schFail.Count) task-scheduler/detection failure(s)"
+                foreach ($lf in (($launchFail + $schFail) | Select-Object -Last 4)) {
                     $ll = $lf.Line.Trim(); if ($ll.Length -gt 180) { $ll = $ll.Substring(0,180) + " ..." }
                     Emit ("    " + $ll)
                 }
-                if ($noSession.Count -gt 0) {
-                    Emit "  Agent also reports NO active user session (console session empty)."
-                    Flag "Agent CANNOT launch on the user's interactive desktop AND sees no active user session -> the Keeper popup and approved apps will never appear. Classic RDP / non-console / disconnected-session targeting problem. NEXT: run 'qwinsta' during a repro. If the user is on rdp-tcp / Disc, retest on the ACTIVE CONSOLE session. If the user is Active+console and the agent still reports 0 sessions, escalate to Keeper engineering with these LAUNCH_FAILED + 'Found 0 active user session' lines."
+                if ($schFail.Count -gt 0 -and $sawUser.Count -gt 0) {
+                    Emit "  Agent DID resolve the active user session, but its Task Scheduler launcher could not spawn the process."
+                    if ($sigReadErr.Count -gt 0) { Emit "  Also: WinTrust signature read failed (CRYPT_E_FILE_ERROR 0x80092003) -- agent could not read the target .exe to verify it." }
+                    Flag "Agent's user-desktop launcher (WindowsTaskSchedulerLauncher) FAILED to spawn the process even though it correctly resolved the logged-on user (schtasks 'cannot find the file specified' + PROCESS_DETECTION_FAILED + Launched: False). The Keeper approval popup and approved apps never start. This is NOT a session/RDP-targeting problem (the agent saw the user; it reproduces from the console too) -> AGENT-SIDE LAUNCH DEFECT. ESCALATE to Keeper engineering with the WindowsTaskSchedulerLauncher SCHTASKS_ERROR + PROCESS_DETECTION_FAILED + USER_DESKTOP_TASK_LAUNCH_RESULT 'Launched: False' lines (and any WinTrust CRYPT_E_FILE_ERROR)."
+                } elseif ($noUser.Count -gt 0 -and $sawUser.Count -eq 0) {
+                    Emit "  Agent reports NO active user session in this window."
+                    Flag "Agent CANNOT launch on the user's interactive desktop AND reports 0 active user sessions -> nobody was logged on, or a session-targeting problem. Confirm with 'qwinsta' during a repro: if the user shows Active (console OR rdp-tcp) and the agent still sees 0, escalate to Keeper engineering; otherwise reproduce while the user is actively logged on."
                 } else {
-                    Flag "Agent logged UserSessionLauncher LAUNCH_FAILED 'on user desktop' -> Keeper popup / approved app could not start in the user's session. Check 'qwinsta' (console vs rdp-tcp, Active vs Disc) before escalating."
+                    Flag "Agent logged UserSessionLauncher LAUNCH_FAILED 'on user desktop' -> Keeper popup / approved app could not start in the user's session. Check whether the agent resolved the logged-on user (WTS_SESSION_SELECTED) just before the failure: if yes -> agent launcher defect (engineering); if it saw 0 sessions -> confirm the user was logged on (qwinsta)."
                 }
             }
         } catch {}
