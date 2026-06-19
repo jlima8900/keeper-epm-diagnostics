@@ -17,6 +17,13 @@ They never change anything, and they redact identities and secrets by default.
 Rule of thumb: the endpoint checks (`.ps1`/`.sh`) say what's **actually happening
 on the box**; the `.py` says what **should** be happening.
 
+See **[SCENARIOS.md](SCENARIOS.md)** for the full list of situations these tools
+detect — and a "my symptom is X → look at scenario Y" shortcut table. A common
+one: *only the Windows UAC prompt appears (never the Keeper approval popup), or an
+approved app is allowed but never actually starts* — that's the agent failing to
+launch onto the user's interactive desktop, often a console-vs-RDP session issue
+(confirm with `qwinsta`).
+
 > **Linux note:** the Keeper EPM agent is **Debian/Ubuntu (`.deb`) only**, and once
 > installed it intercepts plain `sudo` (which fails closed with *"use keepersudo"*) —
 > elevate with `keepersudo`/`keeperagent`. To remove the agent: `keeperagent dpkg
