@@ -6,8 +6,10 @@
     Runs ON a Windows endpoint that has the Keeper Endpoint Privilege Manager
     agent installed and reports the LOCAL health signals the backend cannot see:
     service health, listening ports, plugin binaries, scheduled tasks, policy
-    sync state, logs, .NET runtime, DNS/egress, EDR presence, and local admin
-    membership.
+    sync state, logs, .NET runtime, DNS/egress, EDR presence, local admin
+    membership, and the app-control / launch-blocker posture (AppLocker, WDAC
+    Code Integrity, Defender ASR, Mark-of-the-Web) that can make the agent's
+    scheduled-task user-desktop launch fail.
 
     It needs NO Keeper session and NO Python/Commander -- pure PowerShell, so it
     runs on a clean endpoint. It makes NO changes (read-only); any fix is only
@@ -25,6 +27,17 @@
 
 .PARAMETER Raw
     Show identities (usernames / emails / SIDs) unredacted. Internal use only.
+
+.PARAMETER TargetExe
+    A file path (e.g. the approved app, or KeeperApproval.exe) to inspect for a
+    Mark-of-the-Web / Zone.Identifier block and Authenticode signature. Helps
+    explain a "schtasks could not launch it" failure.
+
+.PARAMETER ProbeSchtasks
+    Opt-in ACTIVE test: create + run + delete a harmless no-op scheduled task to
+    prove whether Task Scheduler launches work at all in this context (this is the
+    mechanism the EPM agent uses for user-desktop launches). This is the ONLY check
+    that writes anything; the temp task is removed immediately. Off by default.
 
 .EXAMPLE
     # Run elevated (health endpoints need admin):
@@ -45,7 +58,9 @@ param(
     [switch]$Json,
     [switch]$Live,
     [switch]$Bundle,
-    [string]$BundlePath = "C:\temp"
+    [string]$BundlePath = "C:\temp",
+    [string]$TargetExe,
+    [switch]$ProbeSchtasks
 )
 
 $ErrorActionPreference = "Continue"
@@ -619,6 +634,119 @@ $edr = @{ "CrowdStrike" = "csagent|CSFalcon"; "SentinelOne" = "Sentinel"; "Sopho
 foreach ($name in $edr.Keys) {
     $found = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $edr[$name] -or $_.DisplayName -match $name }
     if ($found) { Item $name "present" "ensure EPM dir is excluded from real-time scanning" }
+}
+
+# --------------------------------------------------------------------------- #
+Section "11b. APP-CONTROL & LAUNCH BLOCKERS (why a schtasks user-desktop launch can fail)"
+Emit "  The agent launches the approval popup + approved apps by creating a scheduled"
+Emit "  task. App-control (AppLocker/WDAC), Defender ASR, or a Mark-of-the-Web block can"
+Emit "  make that step fail with 'the system cannot find the file specified' even though"
+Emit "  the agent resolved the user correctly. Checking the usual culprits:"
+
+# --- AppLocker: enforcement + recent block events --------------------------- #
+try {
+    $alSvc = Get-Service -Name AppIDSvc -ErrorAction SilentlyContinue
+    $alPol = $null
+    try { $alPol = Get-AppLockerPolicy -Effective -ErrorAction SilentlyContinue } catch {}
+    if ($alPol -and $alPol.RuleCollections) {
+        $modes = ($alPol.RuleCollections | ForEach-Object { "$($_.RuleCollectionType)=$($_.EnforcementMode)" }) -join ", "
+        Item "AppLocker policy" $modes
+        if ($modes -match "Enabled") { Flag "AppLocker is ENFORCING ($modes) -- it can block the agent's launched process. Confirm the EPM bin dir + the approved app are allowed." }
+    } else {
+        Item "AppLocker policy" ("none effective" + $(if ($alSvc) { " (AppIDSvc: $($alSvc.Status))" } else { "" }))
+    }
+    $alBlocks = @()
+    foreach ($lg in @('Microsoft-Windows-AppLocker/EXE and DLL','Microsoft-Windows-AppLocker/MSI and Script')) {
+        try { $alBlocks += @(Get-WinEvent -FilterHashtable @{ LogName = $lg; Id = @(8004,8007); StartTime = (Get-Date).AddDays(-2) } -ErrorAction SilentlyContinue) } catch {}
+    }
+    Item "AppLocker BLOCK events (48h)" $alBlocks.Count
+    if ($alBlocks.Count -gt 0) {
+        foreach ($b in ($alBlocks | Select-Object -First 4)) { Emit ("    " + $b.TimeCreated.ToString("MM-dd HH:mm") + "  " + (($b.Message -split "`n")[0])) }
+        Flag "AppLocker logged $($alBlocks.Count) BLOCK event(s) in the last 48h -- a blocked launch matches 'schtasks could not find the file'. Allow the EPM bin dir + approved apps."
+    }
+} catch { Item "AppLocker" ("query error: " + $_.Exception.Message) }
+
+# --- WDAC / Code Integrity: enforcement + recent block events --------------- #
+try {
+    $dg = Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction SilentlyContinue
+    if ($dg) {
+        $ciState = switch ($dg.CodeIntegrityPolicyEnforcementStatus) { 0 {"Off"} 1 {"Audit"} 2 {"Enforced"} default {"unknown"} }
+        Item "WDAC / Code Integrity" $ciState
+        if ($dg.CodeIntegrityPolicyEnforcementStatus -eq 2) { Flag "WDAC Code Integrity is ENFORCED -- an unsigned/disallowed approved app or launcher helper would be blocked. Check CodeIntegrity/Operational blocks below." }
+    }
+    $ciBlocks = @()
+    try { $ciBlocks = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-CodeIntegrity/Operational'; Id = @(3077,3033); StartTime = (Get-Date).AddDays(-2) } -ErrorAction SilentlyContinue) } catch {}
+    Item "CodeIntegrity BLOCK events (48h)" $ciBlocks.Count
+    if ($ciBlocks.Count -gt 0) {
+        foreach ($b in ($ciBlocks | Select-Object -First 4)) { Emit ("    " + $b.TimeCreated.ToString("MM-dd HH:mm") + "  " + (($b.Message -split "`n")[0])) }
+        Flag "Code Integrity logged $($ciBlocks.Count) BLOCK event(s) in 48h -- the launched process may be disallowed by WDAC."
+    }
+} catch { Item "WDAC" ("query error: " + $_.Exception.Message) }
+
+# --- Defender: real-time/ASR posture + recent ASR/threat events ------------- #
+try {
+    $mp = Get-MpComputerStatus -ErrorAction SilentlyContinue
+    if ($mp) { Item "Defender real-time" $mp.RealTimeProtectionEnabled ($(if ($mp.IsTamperProtected) { "tamper-protected" } else { "" })) }
+    $pref = Get-MpPreference -ErrorAction SilentlyContinue
+    if ($pref -and $pref.AttackSurfaceReductionRules_Ids) {
+        $blockAsr = 0
+        for ($i=0; $i -lt $pref.AttackSurfaceReductionRules_Ids.Count; $i++) {
+            if ($pref.AttackSurfaceReductionRules_Actions[$i] -eq 1) { $blockAsr++ }
+        }
+        Item "Defender ASR rules in Block mode" $blockAsr
+        if ($blockAsr -gt 0) { Flag "Defender has $blockAsr ASR rule(s) in BLOCK mode -- some block child-process creation and can break the agent's scheduled-task launch. Review ASR events (ID 1121) around the repro time." }
+    }
+    if ($pref -and ($pref.ExclusionPath -or $pref.ExclusionProcess)) {
+        $epmExcluded = @($pref.ExclusionPath) -match "Keeper"
+        Item "Defender EPM-dir excluded" ($(if ($epmExcluded) { "yes" } else { "no" }))
+    }
+    $defEvents = @()
+    try { $defEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; Id = @(1121,1116,1117); StartTime = (Get-Date).AddDays(-2) } -ErrorAction SilentlyContinue) } catch {}
+    Item "Defender block/threat events (48h)" $defEvents.Count
+    if ($defEvents.Count -gt 0) {
+        foreach ($b in ($defEvents | Select-Object -First 4)) { Emit ("    " + $b.TimeCreated.ToString("MM-dd HH:mm") + "  id=" + $b.Id + "  " + (($b.Message -split "`n")[0])) }
+        Flag "Defender logged $($defEvents.Count) block/threat event(s) in 48h (ASR 1121 / detection 1116/1117) -- a quarantined or ASR-blocked target explains the launch failure."
+    }
+} catch { Item "Defender" ("query error (Defender module/cmdlets may be absent): " + $_.Exception.Message) }
+
+# --- Target exe: Mark-of-the-Web + signature -------------------------------- #
+if ($TargetExe) {
+    if (Test-Path -LiteralPath $TargetExe) {
+        Item "target exe" $TargetExe
+        $motw = $null
+        try { $motw = Get-Item -LiteralPath $TargetExe -Stream Zone.Identifier -ErrorAction SilentlyContinue } catch {}
+        if ($motw) {
+            Item "  Mark-of-the-Web" "PRESENT (file is flagged downloaded-from-internet)"
+            Flag "Target exe has a Mark-of-the-Web / Zone.Identifier block -- SmartScreen/WDAC/AppLocker may refuse to run it. Clear it: right-click > Properties > Unblock (or 'Unblock-File `"$TargetExe`"')."
+        } else { Item "  Mark-of-the-Web" "none" }
+        try {
+            $sig = Get-AuthenticodeSignature -LiteralPath $TargetExe -ErrorAction SilentlyContinue
+            if ($sig) { Item "  signature" ("$($sig.Status)" + $(if ($sig.SignerCertificate) { " (" + $sig.SignerCertificate.Subject.Split(',')[0] + ")" } else { "" })) }
+        } catch {}
+        # is the file actually readable by THIS context? (the WinTrust CRYPT_E_FILE_ERROR symptom)
+        try { [void][System.IO.File]::OpenRead($TargetExe).Close(); Item "  readable by this account" "yes" }
+        catch { Item "  readable by this account" "NO"; Flag "This account cannot read $TargetExe (matches the agent's WinTrust CRYPT_E_FILE_ERROR). Check the path (mapped/network/OneDrive?) and ACLs." }
+    } else { Item "target exe" "NOT FOUND: $TargetExe" }
+} else {
+    Emit "  (pass -TargetExe '<path to approved app>' to check Mark-of-the-Web + signature + readability)"
+}
+
+# --- schtasks: context + optional active launch probe ----------------------- #
+try { Item "current context" ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) } catch {}
+if ($ProbeSchtasks) {
+    $tn = "KeeperDiagProbe_" + (Get-Random)
+    $probeOk = $false; $probeErr = ""
+    try {
+        $r1 = & schtasks.exe /Create /TN $tn /TR "cmd.exe /c exit" /SC ONCE /ST 23:59 /F 2>&1
+        $r2 = & schtasks.exe /Run /TN $tn 2>&1
+        $r3 = & schtasks.exe /Query /TN $tn 2>&1
+        if ($LASTEXITCODE -eq 0) { $probeOk = $true } else { $probeErr = ($r1,$r2,$r3 -join " | ") }
+    } catch { $probeErr = $_.Exception.Message }
+    finally { & schtasks.exe /Delete /TN $tn /F 2>&1 | Out-Null }
+    Item "schtasks create/run/delete probe" ($(if ($probeOk) { "OK -- Task Scheduler launches work in this context" } else { "FAILED" }))
+    if (-not $probeOk) { Flag "schtasks probe FAILED ($probeErr) -- if the agent uses Task Scheduler to launch on the user desktop, the same failure blocks it. This is the mechanism behind 'the system cannot find the file specified'." }
+} else {
+    Emit "  (pass -ProbeSchtasks to actively test whether Task Scheduler launches work here -- the agent's launch mechanism)"
 }
 
 # --------------------------------------------------------------------------- #
