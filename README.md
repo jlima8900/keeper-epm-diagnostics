@@ -1,20 +1,26 @@
 # keeper-epm-diagnostics
 
-Two small **read-only** tools that help explain why a Keeper Endpoint Privilege
+Small **read-only** tools that help explain why a Keeper Endpoint Privilege
 Manager (EPM) elevation isn't working, and produce a clean, sanitized report you
 can attach to a support case.
 
 They never change anything, and they redact identities and secrets by default.
 
-## The two tools
+## The tools
 
 | Tool | Runs on | Tells you |
 |---|---|---|
-| **`epm_endpoint_check.ps1`** | the Windows endpoint | Is the agent healthy on the box? Services, ports, plugins, the user-session launcher, logs, and whether policies are actually **enforcing**. |
+| **`epm_endpoint_check.ps1`** | the **Windows** endpoint | Is the agent healthy on the box? Services, ports, plugins, the user-session launcher, logs, and whether policies are actually **enforcing**. |
+| **`epm_endpoint_check.sh`** | the **Linux** endpoint (Debian/Ubuntu) | Is the agent (`keeper-privilege-manager`) installed, enrolled, and active? Is `sudo` being governed (you must use **`keepersudo`/`keeperagent`**, not `sudo`)? Plugins, backend reachability, logs. |
 | **`epm_device_diag.py`** | your admin machine | What the backend thinks: is an *enforce* policy actually reaching this device? approvals? events? |
 
-Rule of thumb: the `.ps1` says what's **actually happening on the box**; the
-`.py` says what **should** be happening.
+Rule of thumb: the endpoint checks (`.ps1`/`.sh`) say what's **actually happening
+on the box**; the `.py` says what **should** be happening.
+
+> **Linux note:** the Keeper EPM agent is **Debian/Ubuntu (`.deb`) only**, and once
+> installed it intercepts plain `sudo` (which fails closed with *"use keepersudo"*) —
+> elevate with `keepersudo`/`keeperagent`. To remove the agent: `keeperagent dpkg
+> --purge keeper-privilege-manager` (stopping the service alone won't restore `sudo`).
 
 ## Step-by-step
 
