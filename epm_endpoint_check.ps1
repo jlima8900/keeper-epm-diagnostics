@@ -504,6 +504,26 @@ if (Test-Path $logDir) {
                 Item "  SECURITY VALIDATION" $secfail.Line.Trim() "plugin failed validation"
                 Flag "Log shows 'Plugin failed security validation' -- see $($latest.FullName)"
             }
+
+            # user-session launch failures: the agent cannot place the Keeper popup
+            # OR the approved app onto the user's interactive desktop. Almost always
+            # an RDP / non-console / disconnected-session targeting problem -- it
+            # explains BOTH "no Keeper popup (only UAC)" and "approved app never starts".
+            $launchFail = @($tail | Select-String "LAUNCH_FAILED|Failed to launch .* on user desktop|LAUNCH_APPROVAL_NON_ELEVATED_FAILED")
+            $noSession  = @($tail | Select-String "Found 0 active user session|WTSUserName for session 1: ''")
+            if ($launchFail.Count -gt 0) {
+                Item "  USER-SESSION LAUNCH FAILURES" "$($launchFail.Count) (agent could not launch on the user desktop)"
+                foreach ($lf in ($launchFail | Select-Object -Last 3)) {
+                    $ll = $lf.Line.Trim(); if ($ll.Length -gt 180) { $ll = $ll.Substring(0,180) + " ..." }
+                    Emit ("    " + $ll)
+                }
+                if ($noSession.Count -gt 0) {
+                    Emit "  Agent also reports NO active user session (console session empty)."
+                    Flag "Agent CANNOT launch on the user's interactive desktop AND sees no active user session -> the Keeper popup and approved apps will never appear. Classic RDP / non-console / disconnected-session targeting problem. NEXT: run 'qwinsta' during a repro. If the user is on rdp-tcp / Disc, retest on the ACTIVE CONSOLE session. If the user is Active+console and the agent still reports 0 sessions, escalate to Keeper engineering with these LAUNCH_FAILED + 'Found 0 active user session' lines."
+                } else {
+                    Flag "Agent logged UserSessionLauncher LAUNCH_FAILED 'on user desktop' -> Keeper popup / approved app could not start in the user's session. Check 'qwinsta' (console vs rdp-tcp, Active vs Disc) before escalating."
+                }
+            }
         } catch {}
     }
 } else {
