@@ -1,0 +1,51 @@
+name: lint
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: shellcheck (bash)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck + bash syntax
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y shellcheck; }
+          shellcheck --version
+          shellcheck -S warning epm_endpoint_check.sh
+          bash -n epm_endpoint_check.sh
+
+  powershell:
+    name: PSScriptAnalyzer (PowerShell)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: analyze
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          # Error severity only: this is a pre-existing CLI tool; warnings (Write-Host,
+          # verbs, etc.) are intentional. Fail only on real errors.
+          $r = Invoke-ScriptAnalyzer -Path ./epm_endpoint_check.ps1 -Severity Error
+          $r | Format-Table -AutoSize
+          if ($r) { Write-Error "PSScriptAnalyzer found $($r.Count) error(s)"; exit 1 }
+          Write-Host "PSScriptAnalyzer: no errors"
+
+  python:
+    name: python (compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.x' }
+      - name: compile + pyflakes (non-blocking)
+        run: |
+          python -m py_compile epm_device_diag.py
+          echo "py_compile OK"
+          pip install --quiet pyflakes || true
+          python -m pyflakes epm_device_diag.py || echo "(pyflakes findings are advisory, not failing)"
