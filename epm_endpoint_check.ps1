@@ -732,21 +732,32 @@ if ($TargetExe) {
 }
 
 # --- schtasks: context + optional active launch probe ----------------------- #
-try { Item "current context" ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) } catch {}
+$whoami = $null
+try { $whoami = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name; Item "current context" $whoami } catch {}
 if ($ProbeSchtasks) {
+    # The EPM agent runs as SYSTEM, so the meaningful test is whether a SYSTEM-context
+    # scheduled task can be created + run here. /RU SYSTEM reproduces the agent's own
+    # context regardless of who launched this script (requires admin to create).
     $tn = "KeeperDiagProbe_" + (Get-Random)
-    $probeOk = $false; $probeErr = ""
+    $probeOk = $false; $probeErr = ""; $ranOk = $false
     try {
-        $r1 = & schtasks.exe /Create /TN $tn /TR "cmd.exe /c exit" /SC ONCE /ST 23:59 /F 2>&1
+        $r1 = & schtasks.exe /Create /TN $tn /TR "cmd.exe /c exit" /SC ONCE /ST 23:59 /RU SYSTEM /F 2>&1
+        $created = ($LASTEXITCODE -eq 0)
         $r2 = & schtasks.exe /Run /TN $tn 2>&1
+        $ranOk = ($LASTEXITCODE -eq 0)
         $r3 = & schtasks.exe /Query /TN $tn 2>&1
-        if ($LASTEXITCODE -eq 0) { $probeOk = $true } else { $probeErr = ($r1,$r2,$r3 -join " | ") }
+        if ($created -and $ranOk) { $probeOk = $true } else { $probeErr = (@($r1) + @($r2) + @($r3) -join " | ").Trim() }
     } catch { $probeErr = $_.Exception.Message }
     finally { & schtasks.exe /Delete /TN $tn /F 2>&1 | Out-Null }
-    Item "schtasks create/run/delete probe" ($(if ($probeOk) { "OK -- Task Scheduler launches work in this context" } else { "FAILED" }))
-    if (-not $probeOk) { Flag "schtasks probe FAILED ($probeErr) -- if the agent uses Task Scheduler to launch on the user desktop, the same failure blocks it. This is the mechanism behind 'the system cannot find the file specified'." }
+    Item "schtasks SYSTEM-context probe" ($(if ($probeOk) { "OK -- a SYSTEM scheduled task created + ran (the agent's launch path works here)" } else { "FAILED" }))
+    if (-not $probeOk) {
+        if ($whoami -and $whoami -notmatch "SYSTEM" -and $probeErr -match "Access is denied|denied") {
+            Emit "  (run elevated; creating a /RU SYSTEM task needs admin)"
+        }
+        Flag "schtasks SYSTEM-context probe FAILED ($probeErr) -- the agent uses Task Scheduler (as SYSTEM) to launch on the user desktop, so the same block stops it. This is the mechanism behind 'the system cannot find the file specified'. ENVIRONMENT finding: whitelist schtasks/Task Scheduler for SYSTEM (app-control/EDR), not an agent bug."
+    }
 } else {
-    Emit "  (pass -ProbeSchtasks to actively test whether Task Scheduler launches work here -- the agent's launch mechanism)"
+    Emit "  (pass -ProbeSchtasks to actively test a SYSTEM-context scheduled-task launch -- the agent's exact mechanism)"
 }
 
 # --------------------------------------------------------------------------- #

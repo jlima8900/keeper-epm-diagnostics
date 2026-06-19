@@ -132,7 +132,7 @@ A genuinely healthy, enforcing box instead reports `No blocking issues found`.
 |---|---|
 | `-Region eu` | region for the connectivity test (`com`/`eu`/`us`/`com.au`/`jp`) |
 | `-TargetExe <path>` | inspect an approved app / `KeeperApproval.exe` for a Mark-of-the-Web block, signature, and read-access — explains a "schtasks could not launch it" failure |
-| `-ProbeSchtasks` | actively create+run+delete a harmless no-op scheduled task to prove whether Task Scheduler launches work at all here (the agent's launch mechanism). The only check that writes; the task is removed immediately |
+| `-ProbeSchtasks` | actively create+run+delete a harmless no-op scheduled task **as SYSTEM** (the agent's own context) to prove whether Task Scheduler launches work here — the agent's launch mechanism. The only check that writes; the task is removed immediately |
 | `-Output report.txt` | also write the report to a file |
 | `-Bundle` | build a support bundle (report + recent KeeperLogger logs + `currentPolicies.json`) as one `.zip` in `C:\temp` (change with `-BundlePath`) |
 | `-Live` | capture a window: press Enter, reproduce the elevation, see exactly what the agent did (or didn't do) |
