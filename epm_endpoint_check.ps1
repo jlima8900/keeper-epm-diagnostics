@@ -48,6 +48,14 @@
 
 .NOTES
     Not an official Keeper Security product. Provided as-is, no warranty.
+
+    Version: 1.1.0 (2026-06-25)
+    Changelog:
+      1.1.0 - Validated against EPM agent 2.0.0.82 (in addition to 1.1.0.327).
+              Added "agent version" detection/reporting in Section 1. Component
+              set is build-dependent (1.1 ~31 EXEs, 2.0 ~44) so the 6-binary
+              core list -- not the full set -- gates "corrupt install".
+      1.0.0 - Initial: ground-truthed against EPM 1.1.0.327 on Windows Server 2022.
 #>
 
 [CmdletBinding()]
@@ -350,6 +358,27 @@ if (-not $base) {
 $pluginBin = Join-Path $base "Plugins\bin"
 Item "plugins\bin" (Test-Path $pluginBin)
 $script:Result["install_dir"] = $base
+
+# Agent version -- the component set is build-dependent (1.1 ships ~31 EXEs,
+# 2.0 ships ~44 incl. self-update + agent-governance binaries), so surfacing the
+# installed version helps interpret everything below. Prefer the registry
+# DisplayVersion; fall back to the ProductVersion of the core binary.
+$agentVer = $null
+try {
+    $agentVer = (Get-ItemProperty `
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' `
+        -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -match 'Endpoint Privilege' } |
+        Select-Object -First 1 -Expand DisplayVersion)
+} catch {}
+if (-not $agentVer) {
+    $coreExe = Join-Path $pluginBin "KeeperPrivilegeManager.exe"
+    if (-not (Test-Path $coreExe)) { $coreExe = Join-Path $pluginBin "keeperAgent.exe" }
+    if (Test-Path $coreExe) { try { $agentVer = (Get-Item $coreExe).VersionInfo.ProductVersion } catch {} }
+}
+Item "agent version" $(if ($agentVer) { $agentVer } else { "unknown" })
+$script:Result["agent_version"] = $agentVer
 
 # --------------------------------------------------------------------------- #
 Section "2. WINDOWS SERVICES (Keeper)"
