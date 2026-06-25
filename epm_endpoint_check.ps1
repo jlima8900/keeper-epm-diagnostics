@@ -422,9 +422,14 @@ foreach ($port in 6888,6889,8675) {
 
 # --------------------------------------------------------------------------- #
 Section "5. PLUGIN BINARIES"
-# Core components of the elevation / user-session chain (confirmed present in
-# current EPM builds). Note: there is no "KeeperApproval.exe" -- approval is
-# handled by KeeperUSession / KeeperMessage.
+# Core components of the elevation / user-session chain. This minimal set is
+# present in every build validated to date (1.1.0.327 and 2.0.0.82). The full
+# component set is build-dependent and grows across versions -- 1.1 ships ~31
+# EXEs, 2.0 ships ~44 (adding KeeperUpdater/KeeperUpdaterPrompt for self-update,
+# keeper-agentic-snapshot-writer + KeeperOperatorApproval for agent governance,
+# and incremental-inventory binaries). Do NOT treat the wider set as required;
+# only this core list gates "corrupt install". (Earlier builds were thought to
+# lack KeeperApproval.exe -- that was build-specific; it IS present in 1.1/2.0.)
 $critical = @("keeperAgent","KeeperApi","KeeperClient","KeeperMessage","KeeperPolicy","KeeperUSession")
 $present = @()
 try { $present = @(Get-ChildItem $pluginBin -Recurse -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -Expand BaseName -Unique) } catch {}
